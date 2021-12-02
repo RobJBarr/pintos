@@ -1,0 +1,347 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[margin=0.75in]{geometry}
+\usepackage{enumerate}
+
+\begin{document}
+
+\title{Task 2: User Programs\\Design Document}
+\author{}
+\date{}
+\maketitle
+
+\begin{center}
+Group:\\
+Robert Barr, rjb19@ic.ac.uk\\
+Sebastian Males, sm919@ic.ac.uk\\
+Euan Scott-Watson, es1519@ic.ac.uk\\
+Alex Usher, awu19@ic.ac.uk
+\end{center}
+
+\section{Argument Passing}
+
+\subsection{Data Structures}
+A1: (1 mark)\\
+Copy here the declaration of each new or changed 'struct' or 'struct' member,
+global or static variable, 'typedef', or enumeration. Identify the purpose
+of each in roughly 25 words.
+\begin{center}\textbf{moved to thread.h}\end{center}
+\begin{verbatim}
+#define THREAD_MAGIC 0xcd6abf4b
+\end{verbatim}
+A random value for \verb|struct thread|'s magic member, used to detect overflow.
+Moved to thread.h so it can be accessed in process.c to detect overflow in argument passing.
+
+\subsection{Algorithms}
+A2: (2 marks)\\
+How does your argument parsing code avoid overflowing the user's stack page?
+What are the efficiency considerations of your approach?\bigskip\\
+After each write to the stack, a call to \verb|check_thread_magic| is made. This checks whether an overflow
+has occurred by seeing if the current thread's 'magic' field has changed from \verb|THREAD_MAGIC|. If the 'magic'
+value has changed, the allocated pages are freed and the thread exits. All other memory allocations in the
+argument parsing code use \verb|palloc_get_page| to get their own page from memory and so do not use
+the user stack page. This implementation is not the most time or space efficient as multiple pages in
+memory are used up instead of just one and \verb|palloc_get_page| acquires a lock which means the thread may
+have to wait for the lock to be released first, however it avoids any chance of overflowing the stack page.
+
+\subsection{Rationale}
+A3: (2 marks)\\
+Pintos does not implement \verb|strtok()| because it is not thread safe. Explain the
+problem with \verb|strtok()| and how \verb|strtok_r| avoids this issue.\bigskip\\
+\verb|strtok()| uses a statically allocated buffer which could cause a race condition
+if multiple threads attempt to call \verb|strtok()| at the same time as one thread could
+overwrite the buffer whilst the other was attempting to write to it. \verb|strtok_r()|
+avoids this issue by using a dynamically allocated buffer so that every call to \verb|strtok_r()|
+uses a different location in memory (using the saveptr) and so there is no chance of one thread overwriting the buffer
+of another thread calling \verb|strtok_r()|.\bigskip\\
+A4: (3 marks)\\
+In Pintos, the kernel separates commands into an executable name and arguments.
+In Unix-like systems, the shell does this separation. Identify three advantages
+of the Unix approach.\bigskip\\
+One advantage of the Unix approach is that it provides increased security as
+the user cannot access any kernel code before execution and so cannot exploit any bugs in the argument
+passing code.
+A second advantage of the Unix approach it is the responsibility of the shell to parse the arguments
+correctly and so the kernel code can be used in different shell types instead of having to modify the
+kernel code for each different shell. This means each user can use a different shell interpreter for the same kernel code.
+A third advantage of the Unix approach is that users may only access the files and commands they have
+permission to access as the shell runs as the user and so will reject invalid access before
+reaching the kernel code. This stops the kernel from incorrectly giving access to a resource the user
+doesn't have permissions for and allows different users to have different permissions.
+
+\section{System Calls}
+\subsection{Data Structures}
+B1: (6 marks)\\
+Copy here the declaration of each new or changed 'struct' or 'struct' member, 
+global or static variable, 'typedef', or enumeration. Identify the purpose of each
+in roughly 25 words.
+
+\begin{center}\textbf{thread.h}\end{center}
+
+\begin{verbatim}
+#define FD_START 2 /* First fd for each thread */
+\end{verbatim}
+\verb|FD_START| is the minimum value a file descriptor can take, since 0 is taken for 
+\verb|STDIN_FILENO| and 1 is taken for \verb|STDOUT_FILENO|. We initialise \verb|next_fd| to this
+value in \verb|thread.c|.\bigskip\\
+Added to 'struct' thread:
+\begin{verbatim}
+  struct list open_files;  /* list containing files in use by the thread. */
+  struct list children;    /* List of child threads. */
+  struct child_elem *duty; /* Pointer to the child duties. Can be NULL. */    
+  struct file *open_exec;  /* Executable file being run by a thread. Can be NULL */
+  int next_fd;             /* Stores the next fd to give to a file being opened. */
+\end{verbatim}
+\verb|open_files| is a list containing all files currently in use by the thread.\\
+\verb|children| stores the list of child threads, whereby the given thread 
+is the parent of all elements in this list.\\
+\verb|duty| points to the thread's corresponding third-party struct that would be inserted
+into a parent thread's \verb|children| list (see below). It is NULL if the thread is not a
+child, or is deallocated and set to NULL upon termination of the parent process.\\
+\verb|open_exec| stores a user program's executable file, used for denying and allowing
+writes; this is freed
+when the process exits.\\
+\verb|next_fd| stores the next file descriptor for this particular process. It
+is initialised to \verb|FD_START| which is the first valid fd value.
+
+\begin{verbatim}
+/* The struct used to represent the "childhood" of a process & the "duties"
+ a child process has towards its parent. This structure outlives the
+ process it is associated with by being malloced. */
+struct child_elem { 
+  struct semaphore *wait; /* Semaphore used for waking up the parent,
+                             can be NULL. */
+  int exit_status;        /* The status of the child if it has exited, 
+                             INVALID_STATUS otherwise. */
+  tid_t thread_tid;       /* The id of the child associated with the child_elem. */
+  struct thread *t;       /* Pointer to the associated thread, can be NULL. */
+  struct list_elem elem;  /* List_elem to insert into the children list. */
+};
+\end{verbatim}
+This struct represents the third-party structure which we use for \verb|process_wait()|.\\
+\verb|wait| and \verb|exit_status| are related. If the child has not terminated and has had
+wait called upon it, then \verb|wait| is initialised and the child is responsible for
+calling \verb|sema_up()| on it before termination. Upon termination, the child is also
+responsible for setting \verb|exit_status()| to its exit status. However, if when
+a child exits its \verb|child_elem| is set to NULL, its parent process
+has already terminated (or it doesn't exist) hence, the child doesn't have to do
+anything - no "duty". \\
+\verb|elem| is simply the \verb|list_elem| used to insert this structure into a parent
+thread's \verb|children| list.\\
+\verb|thread_tid| is the thread id of the child thread. It is important to store
+this here since after the termination of the child the member \verb|t| will be NULL
+but we might still need the tid for lookups in the children list from
+\verb|thread|.\\ 
+\verb|t| is the pointer to the child's thread struct. This is not NULL, as long as
+the child hasn't finished.
+
+\begin{center}\textbf{syscall.h}\end{center}
+\begin{verbatim}
+#define MAX_BUFFER_LENGTH 256
+#define HANDLED_SYSCALLS 13
+#define ERROR -1
+#define USER_VADDR_BOTTOM ((void *)0x08048000)
+#define SAFE_EXIT NULL
+
+/* Used to insert a file mapping of file descriptor,
+ * struct file into a thread's file list. */
+struct file_elem {
+  struct list_elem elem;
+  struct file *file;
+  int fd;
+};
+\end{verbatim}
+\verb|MAX_BUFFER_LENGTH| defines the maximum size (in bytes) of a buffer write to \verb|STDOUT_FILENO|.
+This follows the specification that any reasonable size (below a few hundred bytes) can be written in
+one write.\\
+\verb|HANDLED_SYSCALLS| defines the number of syscalls we handle in task, which is important for
+initialising the array of syscalls in \verb|syscall.c|.\\
+\verb|ERROR| is the error code we return when there is a problem within a syscall function.\\
+\verb|USER_VADDR_BOTTOM| represents the lowest address that a user memory location can have. It is
+used when validating user memory addresses.\\
+We use the type \verb|struct file_elem| to represent a mapping from a \verb|struct file| pointer
+to the corresponding file descriptor. This is inserted into a thread's \verb|open_files| list using
+\verb|elem|, and is used to obtain the \verb|struct file *| from the file descriptor in \verb|syscall.c|.\\
+\verb|SAFE_EXIT| is a handy macro because we have
+made our calls to \verb|sys_exit| with NULL as a
+parameter to
+default to the exit code -1. Hence instead of writing
+\verb|sys_exit(NULL)| we write the more explicit \verb|sys_exit(SAFE_EXIT)|.
+
+\begin{center}\textbf{syscall.c}\end{center}
+\begin{verbatim}
+/* Array of sys call handlers mapped to their specific code.
+ * Each function is responsible for retrieving its own parameters
+ * from the stack and setting the return result into the eax register.*/
+intr_handler_func *handlers[HANDLED_SYSCALLS];
+
+/* Lock to synchronize the file system - called whenever files are used. */
+struct lock file_lock;
+\end{verbatim}
+\verb|handlers| is an array of function pointers, each representing one of the syscalls. They
+are indexed following \verb|syscall_nr.h|.\\
+\verb|file_lock| is used to synchronise accesses to the file system, avoiding potential data
+loss/corruption. This is also defined as \verb|extern| in \verb|syscall.h| to allow its use
+in other files.
+
+\subsection{Algorithms}
+B2: (2 marks)\\
+Describe how your code ensures safe memory access of user provided data from within
+the kernel.\bigskip\\
+We have two functions: \verb|validate_byte()| and \verb|validate_buffer()|. The first function checks a
+pointer is valid by calling \verb|is_user_vaddr()| and calls \verb|get_user| to check for segfaults. If
+this comes back as an error, the \verb|safe_exit| function is called. The second function validates
+the entire buffer by looping through each value in the buffer. In the loop, it calls the \verb|validate_byte()|
+function to check if the data is valid, if not it will exit. \\
+There is also \verb|read_mem_user()| which takes in a source for data and a destination for the data to be
+copied into. It then loops through the data, validates it using \verb|validate_byte()| and if the data
+is valid, writes it into the destination location. \\
+Finally, \verb|get_user()| and \verb|put_user()| are two functions given by the spec that are used
+to read and write a byte to a virtual address. If these functions fail we know that there was an error.\bigskip\\
+B3: (3 marks)\\
+Suppose that we choose to verify user provided pointers by validating them before use
+(i.e. using the first method described in the spec).\\
+What is the least and greatest possible number of inspections of the page table (e.g.
+calls to\\ \verb|pagedir_get_page()|) that would need to be made in the following cases?\\
+a) A system call that passes the kernel a pointer to 10 bytes of user data.\\
+b) A system call that passes the kernel a pointer to a full page (4,096 bytes) of user data.\\
+c) A system call that passes the kernel a pointer to 4 full pages (16,384 bytes) of
+user data.\\
+You must briefly explain the checking tactic you would use and how it applies to each case 
+to generate your answers.\bigskip\\
+a) For 10 bytes, the least number of calls would be 1. If we were to get a kernel virtual address that has
+more than 10 bytes to the end of the page, we know that all the data would be in the page. If the
+data is not contiguous then the greatest number of calls we would have to do would be 10 in
+which each byte is stored in a different page that we must get. \\
+b) If all the data is stored on one page then at minimum it would be called once. The greatest number
+of times would be 4096 if the data were to be distributed in byte sized pieces across 4096 different pages
+-i.e. called once for each byte. \\
+c) As 16,384 bytes of data will be 4 pages worth of data, if all 4 pages worth of data were able to be stored
+into 4 pages, then only 4 calls would be required. However, they could be spread like before
+with each byte being on a new page. This would therefore result in 16,384 calls to \verb|pagedir_get_page()|.\bigskip\\
+B4: (2 marks)\\
+When an error is detected during a system call handler, how do you ensure that all 
+temporarily allocated resources (locks, buffers etc.) are freed?\bigskip\\
+When an error is detected, a function named "\verb|safe_exit()|" is called. This checks that if the current thread is holding
+on to the file system lock, then it releases it before killing the thread. Moreover, whenever there is an allocation of memory
+it will be freed within the function it was allocated no matter the path taken. This means that if the thread fails, it will
+be freed before the thread is killed, and if the thread was successful, then at the end of the function the memory allocated is freed.\bigskip\\
+B5: (8 marks)\\
+Describe your implementation of the 'wait' system call and how it interacts with
+process termination for both the parent and child.\bigskip\\
+Each process keeps track of its children with the
+\verb|children| list member from thread. This contains
+\verb|child_elems| and each child adds itself to the
+parent's list at creation in \verb|thread_create|. These
+elements are manually allocated and are meant to represent
+the duty a child has to its parent. That is, wake it up
+on exit if a wait has been called on the child or
+set its exit
+code so the parent can retrieve it from there. The
+\verb|child_elem| of a process is not freed when the
+process exits but rather when the parent exits or
+after wait has been called on the process (so a double
+wait is not possible). Thus, when a process calls
+wait on another if the process is indeed a child
+of the caller, the parent checks if the exit code
+has been set in the \verb|child_elem| from its
+\verb|children| list. If it did then return, otherwise
+the parent sets itself to the \verb|t| member of the
+\verb|child_elem| and blocks so the child knows to wake up its parent upon termination.
+
+\subsection{Synchronisation}
+B6: (2 marks)\\
+The "exec" system call returns -1 if loading the new executable fails,
+so it cannot return before the new executable has completed loading. 
+How does your code ensure this? How is the load success/failure
+status passed back to the thread that calls "exec"?\bigskip\\
+The \verb|sys_exec| call returns the return value of \verb|process_execute|, 
+the parent creates a semaphore and a bool called 'success' in \verb|process_execute|
+and passes as an aux argument to \verb|thread_create|, which is then passed
+to \verb|start_process|, an array of pointers containing the 2 and the file name.
+After the \verb|thread_create| call, the parents blocks itself with a \verb|sema_down|
+if \verb|thread_create| did not return -1 (in which case, \verb|process_execute|
+quits right away by returning -1).
+If any of the allocations in \verb|start_process| fail, the child process sets
+the bool success to false and does \verb|sema_up| (and if all of the allocations don't
+raise any issues then \verb|sema_up| is called subsequently anyway). After the parent
+has been woken up, if the boolean success is false then the call returns with a -1.\bigskip\\
+B7: (5 marks)\\
+Consider parent process P with child process C.\\
+How do you ensure proper synchronisation and avoid race conditions where:\bigskip\\
+i)   P calls wait(C) before C exits?\\
+If P calls wait(C) before C exits and C is indeed a child of P then
+P can tell that C hasn't finished because the exit status from the
+\verb|child_elem| is set to it's default value. P proceeds to
+create a semaphore that is added to \verb|child_elem| 
+(so the child can wake up the parent) and
+does \verb|sema_down|. Notice that if \verb|sema_up| is called
+before from the child before the parent calls \verb|sema_down| (because
+of a sudden context switch) this is not an issue since if the value
+in the semaphore is 1 \verb|sema_down| doesn't block.\bigskip\\
+ii)  P calls wait(C) after C exits?\\
+If P calls wait(C) and C is indeed a child of P then the
+\verb|child_elem| is still in the \verb|children| list (since this
+is freed and removed only by the parent) but the exit status is set
+to a different value than its default value. Hence, the parent returns
+that without blocking. No synchronisation issues occur since after
+the child terminates, only the parent can alter the state of the
+\verb|child_elem|.\bigskip\\
+iii) P terminates, without waiting, before C exits?\\
+If P terminates before C then the child shouldn't do anything on exit.
+P frees all the \verb|child_elems| of its children and sets the
+pointers from the children process to their duty to NULL. If the child checks
+its duty and sees that it is NULL then it doesn't do anything. The important
+part to synchronising these 2 is that the checks the child does on the pointer
+to \verb|child_elem| are atomic because we turn the interrupts off when this happens
+(at the end of \verb|sys_exit| and the end of \verb|process_exit|).\bigskip\\
+iv)  P terminates, without waiting, after C exits?\\
+If P terminates after C then P simply frees
+all of the duties of its children and checks if the child thread is still attached to
+the duty. If it isn't (and it this case it isn't because the child thread sets
+\verb|t| to NULL when it finished) then it doesn't do anything to it. Notice that
+we avoid race conditions here because the interrupts are turned off during this while
+loop. Hence, the pointer cannot be set to NULL after it has been checked and before
+it is dereferenced.\bigskip\\
+Additionally, how do you ensure that all resources are freed regardless of the above
+case?\bigskip\\
+Fundamentally, the key to freeing all the resources allocated is that the parent allocates
+the \verb|child_elems| for all of its children and it frees all of those resources at exit.
+The only exception to this is when the parent frees a child earlier after it has waited for it
+so that double waits are now allowed but once again, this is safe because the parent is the only
+entity managing this memory. It is also worth mentioning again that we ensure synchronisation between
+the parent and the child when it comes to the \verb|child_elem| itself by turning the interrupts
+off in the child on the sections where it is used so we avoid dereferencing NULL pointers
+after checking for it.
+
+\subsection{Rationale}
+B8: (2 marks)\\
+Why did you choose to implement safe access of user memory from the kernel in this
+way?\bigskip\\
+We chose to modify the code for \verb|page_fault()| as it would allow the CPU to utilise
+its MMU. This meant that we would get faster execution. Therefore, this leads to fewer
+bottlenecks when it comes to validating pointers. Moreover, the way in which we implemented
+the checks meant that we would not risk leaking any resources as any failed validations
+would lead to the freeing of any resources and the file system lock.\bigskip\\
+B9: (2 marks)
+What advantages and disadvantages can you see to your design for file descriptors?\bigskip\\
+Our implementation of file descriptors uses a \verb|struct list| in each thread, storing a
+list of structs representing a mapping from a \verb|struct file *| to a file descriptor.
+When a file descriptor is referenced, we search through this list to see if there is a
+mapping with it. If there is, we can then easily access the corresponding file.\\
+We chose this implementation for its benefits concerning time complexity. Although there is
+the additional space complexity by storing the list in the thread 'struct', the time
+complexity benefits outweigh this factor. The only other plausible solution is to have a
+global static list storing the mapping of all file descriptors to their respective files - 
+searching through this would evidently take much longer than searching through only those
+related to a thread, especially given that this list would then also have to be synchronised.\\
+We chose to use an int value, stored within the thread struct, to store the next file
+descriptor a newly opened file for the thread would take. We chose to implement this
+within the thread struct, as opposed to as a global variable in \verb|syscall.c|.
+The main reason behind this is that we can then open a greater amount of
+files before the value \verb|next_fd| overflows - a thread would have to open
+\verb|INT_MAX| files before exiting, before it would overflow. If we stored this
+globally instead, we could only open \verb|INT_MAX| files in total before it would overflow,
+and this would not be ideal in a system that may be running for long periods of time.
+
+\end{document}
